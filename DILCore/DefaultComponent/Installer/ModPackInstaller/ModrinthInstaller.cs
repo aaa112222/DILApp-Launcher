@@ -1,0 +1,196 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.Json;
+using System.Threading;
+using System.Threading.Tasks;
+using DILCore.Class.Helper;
+using DILCore.Class.Helper.Download;
+using DILCore.Class.Model;
+using DILCore.Class.Model.Downloading;
+using DILCore.Class.Model.Modrinth;
+using DILCore.Interface;
+
+namespace DILCore.DefaultComponent.Installer.ModPackInstaller;
+
+public sealed class ModrinthInstaller : ModPackInstallerBase, IModrinthInstaller
+{
+    public string? GameId { get; init; }
+    public override string RootPath { get; init; } = string.Empty;
+    public required string ModPackPath { get; init; }
+
+    public async Task<ModrinthModPackIndexModel?> ReadIndexTask()
+    {
+        var path = Path.GetFullPath(this.ModPackPath);
+
+        await using var fs = File.OpenRead(path);
+        await using var archive = new ZipArchive(fs, ZipArchiveMode.Read);
+
+        var manifestEntry =
+            archive.Entries.FirstOrDefault(x =>
+                x.FullName.Equals("modrinth.index.json", StringComparison.OrdinalIgnoreCase));
+
+        if (manifestEntry == null)
+            return null;
+
+        await using var stream = await manifestEntry.OpenAsync();
+
+        var manifestModel =
+            await JsonSerializer.DeserializeAsync(stream, SerializerContext.Default.ModrinthModPackIndexModel);
+
+        return manifestModel;
+    }
+
+    public void Install()
+    {
+        this.InstallTaskAsync().GetAwaiter().GetResult();
+    }
+
+    public async Task InstallTaskAsync()
+    {
+        ArgumentException.ThrowIfNullOrEmpty(this.GameId);
+        ArgumentException.ThrowIfNullOrEmpty(this.RootPath);
+
+        this.InvokeStatusChangedEvent("Starting installation", ProgressValue.Start);
+
+        await this.DownloadModsTaskAsync();
+        await this.InstallOverridesTaskAsync();
+
+        this.InvokeStatusChangedEvent("Installation completed", ProgressValue.Finished);
+    }
+
+    public override async Task DownloadModsTaskAsync(CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(this.GameId);
+        ArgumentException.ThrowIfNullOrEmpty(this.RootPath);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var index = await this.ReadIndexTask() ?? throw new Exception("Failed to read the Modrinth manifest file.");
+        var idPath = Path.Combine(this.RootPath, GamePathHelper.GetGamePath(this.GameId));
+        var downloadPath = Path.Combine(Path.GetFullPath(idPath), "mods");
+
+        var di = new DirectoryInfo(downloadPath);
+
+        if (!di.Exists)
+            di.Create();
+
+        var downloadFiles = new List<MultiSourceDownloadFile>();
+
+        foreach (var file in index.Files)
+        {
+            if (string.IsNullOrEmpty(file.Path)) continue;
+            if (file.Downloads.Length == 0) continue;
+
+            var fullPath = Path.Combine(idPath, file.Path);
+            var downloadDir = Path.GetDirectoryName(fullPath)!;
+            var fileName = Path.GetFileName(fullPath);
+            var checkSum = file.Hashes.TryGetValue("sha1", out var sha1) ? sha1 : string.Empty;
+            var fileDownloadPath = Path.Combine(downloadDir, fileName);
+
+            if (File.Exists(fileDownloadPath) && !string.IsNullOrEmpty(checkSum))
+                try
+                {
+                    // Check local file
+                    await using var fs = File.OpenRead(fileDownloadPath);
+                    var computedSha1 = await SHA1.HashDataAsync(fs);
+
+                    if (Convert.ToHexString(computedSha1).Equals(sha1, StringComparison.OrdinalIgnoreCase))
+                        continue;
+                }
+                catch (Exception)
+                {
+                    // ignored
+                }
+
+            IEnumerable<string> urls = this.DownloadUriReplacer == null
+                ? file.Downloads
+                : [.. this.DownloadUriReplacer(file.Downloads), .. file.Downloads];
+
+            var df = new MultiSourceDownloadFile
+            {
+                CheckSum = checkSum,
+                DownloadPath = downloadDir,
+                DownloadUris = [.. urls.Distinct().Select(u => new DownloadUriInfo(u, 1))],
+                FileName = fileName,
+                FileSize = file.Size
+            };
+            downloadFiles.Add(df);
+        }
+
+        await this.DownloadFilesTaskAsync(downloadFiles, new DownloadSettings
+        {
+            DownloadParts = 8,
+            RetryCount = this.GetDownloadRetryCount(downloadFiles),
+            Timeout = TimeSpan.FromMinutes(1),
+            CheckFile = true,
+            HashType = HashType.SHA1,
+            HttpClientFactory = this.HttpClientFactory
+        }, cancellationToken);
+
+        this.ThrowIfDownloadsFailed();
+    }
+
+    public override async Task InstallOverridesTaskAsync(CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrEmpty(this.GameId);
+        ArgumentException.ThrowIfNullOrEmpty(this.RootPath);
+        cancellationToken.ThrowIfCancellationRequested();
+
+        var idPath = Path.Combine(this.RootPath, GamePathHelper.GetGamePath(this.GameId));
+
+        var modPackFullPath = Path.GetFullPath(this.ModPackPath);
+
+        Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+        var gbk = Encoding.GetEncoding("GBK");
+
+        await using var modPackFs = File.OpenRead(modPackFullPath);
+        await using var archive = new ZipArchive(modPackFs, ZipArchiveMode.Read, true, gbk);
+
+        this.TotalDownloaded = 0;
+        this.NeedToDownload = archive.Entries.Count;
+
+        const string decompressPrefix = "overrides";
+
+        foreach (var entry in archive.Entries)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+
+            if (!entry.FullName.StartsWith(decompressPrefix, StringComparison.OrdinalIgnoreCase)) continue;
+
+            var subPath = entry.FullName[(decompressPrefix.Length + 1)..];
+            if (string.IsNullOrEmpty(subPath)) continue;
+
+            var path = Path.Combine(Path.GetFullPath(idPath), subPath);
+            var dirPath = Path.GetDirectoryName(path)!;
+
+            if (!Directory.Exists(dirPath))
+                Directory.CreateDirectory(dirPath);
+            if (entry.IsDirectory())
+            {
+                if (!Directory.Exists(path))
+                    Directory.CreateDirectory(path);
+                continue;
+            }
+
+            var subPathLength = subPath.Length;
+            var subPathName = subPathLength > 35
+                ? $"...{subPath[(subPathLength - 15)..]}"
+                : subPath;
+
+            var progress = ProgressValue.Create(this.TotalDownloaded, this.NeedToDownload);
+
+            this.InvokeStatusChangedEvent($"Extracting installation file: {subPathName}", progress);
+
+            await using var fs = File.OpenWrite(path);
+            await using var entryStream = await entry.OpenAsync();
+
+            await entryStream.CopyToAsync(fs, cancellationToken);
+
+            this.TotalDownloaded++;
+        }
+    }
+}

@@ -1,0 +1,146 @@
+﻿using System;
+using System.IO;
+using System.IO.Compression;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using DILCore.Class;
+using DILCore.Class.Helper;
+using DILCore.Class.Model;
+using DILCore.Class.Model.YggdrasilAuth;
+using DILCore.Interface;
+using VersionInfo = DILCore.Class.Model.Forge.VersionInfo;
+
+namespace DILCore.DefaultComponent.Installer.ForgeInstaller;
+
+public class LegacyForgeInstaller : InstallerBase, IForgeInstaller
+{
+    public required string ForgeVersion { get; init; }
+
+    public string DownloadUrlRoot
+    {
+        get => throw new NotImplementedException();
+        init => throw new NotImplementedException();
+    }
+
+    public required string ForgeExecutablePath { get; init; }
+    public override required string RootPath { get; init; }
+
+    public VersionLocatorBase VersionLocator
+    {
+        get => throw new NotImplementedException();
+        init => throw new NotImplementedException();
+    }
+
+    public ForgeInstallResult InstallForge()
+    {
+        return this.InstallForgeTaskAsync().GetAwaiter().GetResult();
+    }
+
+    public async Task<ForgeInstallResult> InstallForgeTaskAsync()
+    {
+        try
+        {
+            this.InvokeStatusChangedEvent("Extracting installation files", ProgressValue.Start);
+
+            await using var forgeFs = File.OpenRead(this.ForgeExecutablePath);
+            await using var reader = new ZipArchive(forgeFs, ZipArchiveMode.Read);
+
+            var profileEntry =
+                reader.Entries.FirstOrDefault(e => e.FullName.Equals("install_profile.json", StringComparison.Ordinal));
+            var legacyJarEntry =
+                reader.Entries.FirstOrDefault(e =>
+                    e.FullName.Equals($"forge-{this.ForgeVersion}-universal.jar", StringComparison.OrdinalIgnoreCase));
+
+            if (profileEntry == null)
+                return new ForgeInstallResult
+                {
+                    Error = new ErrorModel
+                    {
+                        Cause = "install_profile.json was not found.",
+                        Error = "install_profile.json was not found.",
+                        ErrorMessage = "install_profile.json was not found."
+                    },
+                    Succeeded = false
+                };
+
+            if (legacyJarEntry == null)
+                return new ForgeInstallResult
+                {
+                    Error = new ErrorModel
+                    {
+                        Cause = "The Forge JAR was not found.",
+                        Error = "The Forge JAR was not found.",
+                        ErrorMessage = "The Forge JAR was not found."
+                    },
+                    Succeeded = false
+                };
+
+            this.InvokeStatusChangedEvent("Extraction completed", ProgressValue.FromDisplay(5));
+
+            await using var stream = await profileEntry.OpenAsync();
+
+            this.InvokeStatusChangedEvent("Parsing the installation profile", ProgressValue.FromDisplay(35));
+
+            var profileModel =
+                await JsonSerializer.DeserializeAsync(stream, SerializerContext.Default.LegacyForgeInstallProfile);
+
+            ArgumentNullException.ThrowIfNull(profileModel);
+
+            this.InvokeStatusChangedEvent("Parsing completed", ProgressValue.FromDisplay(75));
+
+            var id = string.IsNullOrEmpty(this.CustomId) ? profileModel.VersionInfo.Id : this.CustomId;
+
+            var installDir = Path.Combine(this.RootPath, GamePathHelper.GetGamePath(id));
+            var jsonPath = GamePathHelper.GetGameJsonPath(this.RootPath, id);
+
+            var forgeDi = new DirectoryInfo(installDir);
+            if (!forgeDi.Exists)
+                forgeDi.Create();
+
+            profileModel.VersionInfo.Id = id;
+            if (!string.IsNullOrEmpty(this.InheritsFrom))
+                profileModel.VersionInfo.InheritsFrom = this.InheritsFrom;
+
+            var forgeLibrary = profileModel.VersionInfo.Libraries.First(l =>
+                l.Name.StartsWith("net.minecraftforge:forge", StringComparison.OrdinalIgnoreCase));
+            var mavenInfo = forgeLibrary.Name.ResolveMavenString()!;
+
+            var libSubPath = GamePathHelper.GetLibraryPath(mavenInfo.Path);
+            var forgeLibPath = Path.Combine(this.RootPath, libSubPath);
+
+            var libDi = new DirectoryInfo(Path.GetDirectoryName(forgeLibPath)!);
+
+            if (!libDi.Exists)
+                libDi.Create();
+
+            await using var fs = File.OpenWrite(forgeLibPath);
+            await using var legacyJarEntryStream = await legacyJarEntry.OpenAsync();
+
+            await legacyJarEntryStream.CopyToAsync(fs);
+
+            var versionJsonString = JsonSerializer.Serialize(profileModel.VersionInfo, typeof(VersionInfo),
+                new SerializerContext(JsonHelper.CamelCasePropertyNamesSettings()));
+
+            await File.WriteAllTextAsync(jsonPath, versionJsonString);
+            this.InvokeStatusChangedEvent("File writing completed", ProgressValue.Finished);
+
+            return new ForgeInstallResult
+            {
+                Succeeded = true
+            };
+        }
+        catch (Exception ex)
+        {
+            return new ForgeInstallResult
+            {
+                Error = new ErrorModel
+                {
+                    Error = "Installation failed.",
+                    Exception = ex
+                },
+                Succeeded = false
+            };
+        }
+    }
+}

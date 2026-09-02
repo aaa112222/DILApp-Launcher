@@ -1,0 +1,124 @@
+﻿using System;
+using System.Threading.Tasks;
+using DILCore.Class.Helper;
+using DILCore.Class.Model;
+using DILCore.Class.Model.Auth;
+using DILCore.Class.Model.LauncherAccount;
+using DILCore.Class.Model.LauncherProfile;
+using DILCore.Class.Model.YggdrasilAuth;
+using DILCore.Interface;
+
+namespace DILCore.DefaultComponent.Authenticator;
+
+/// <summary>
+///     表示一个离线凭据验证器。
+/// </summary>
+public class OfflineAuthenticator : IAuthenticator
+{
+    /// <summary>
+    ///     获取或设置用户名。
+    /// </summary>
+    public required string Username { get; init; }
+
+    /// <summary>
+    ///     获取或设置启动程序配置文件分析器。
+    /// </summary>
+    public required ILauncherAccountParser LauncherAccountParser { get; init; }
+
+    /// <summary>
+    ///     验证凭据。
+    /// </summary>
+    /// <param name="userField">该参数将被忽略。</param>
+    /// <returns>身份验证结果。</returns>
+    public AuthResultBase Auth(bool userField = false)
+    {
+        var authProperty = new AuthPropertyModel
+        {
+            Name = "preferredLanguage",
+            ProfileId = string.Empty,
+            UserId = Guid.NewGuid(),
+            Value = "zh-cn"
+        };
+
+        var uuid = this.Username.ToGuidHashAsName();
+        var localUuid = Guid.NewGuid().ToString("N");
+        var accountModel = new AccountModel
+        {
+            Id = uuid,
+            AccessToken = Guid.NewGuid().ToString("N"),
+            AccessTokenExpiresAt = DateTime.Now,
+            EligibleForMigration = false,
+            HasMultipleProfiles = false,
+            Legacy = false,
+            LocalId = localUuid,
+            MinecraftProfile = new AccountProfileModel
+            {
+                Id = uuid.ToString("N"),
+                Name = this.Username
+            },
+            Persistent = true,
+            RemoteId = Guid.NewGuid().ToString("N"),
+            Type = "Mojang",
+            UserProperites = [authProperty],
+            Username = this.Username
+        };
+
+        if (!this.LauncherAccountParser.AddOrReplaceAccount(localUuid, accountModel, out var id))
+            return new AuthResultBase
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Cause = "An error occurred while adding the record.",
+                    Error = "Failed to add the account.",
+                    ErrorMessage = "Check the permissions for launcher_accounts.json."
+                }
+            };
+
+        var result = new AuthResultBase
+        {
+            Id = id ?? Guid.Empty,
+            AccessToken = Guid.NewGuid().ToString("N"),
+            AuthStatus = AuthStatus.Succeeded,
+            SelectedProfile = new ProfileInfoModel
+            {
+                Name = this.Username,
+                Id = uuid
+            },
+            User = new UserInfoModel
+            {
+                Id = uuid,
+                Properties =
+                [
+                    new PropertyModel
+                    {
+                        Name = authProperty.Name,
+                        Value = authProperty.Value
+                    }
+                ]
+            }
+        };
+
+        return result;
+    }
+
+    /// <summary>
+    ///     异步验证凭据。
+    /// </summary>
+    /// <param name="userField">改参数将被忽略。</param>
+    /// <returns></returns>
+    public Task<AuthResultBase> AuthTaskAsync(bool userField)
+    {
+        return Task.FromResult(this.Auth());
+    }
+
+    /// <summary>
+    ///     验证凭据。
+    /// </summary>
+    /// <returns>验证结果。</returns>
+    [Obsolete("This method is obsolete. Use Auth(bool) instead.")]
+    public AuthResultBase GetLastAuthResult()
+    {
+        return this.Auth();
+    }
+}

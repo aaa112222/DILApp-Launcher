@@ -1,0 +1,125 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
+using System.Threading.Tasks;
+using DILCore.Class.Helper;
+using DILCore.Class.Model;
+using DILCore.Class.Model.LiteLoader;
+using DILCore.DefaultComponent.Launch;
+using DILCore.Exceptions;
+using DILCore.Interface;
+
+namespace DILCore.DefaultComponent.Installer;
+
+public class LiteLoaderInstaller : InstallerBase, ILiteLoaderInstaller
+{
+    const string SnapshotRoot = "https://dl.liteloader.com/versions/";
+    const string ReleaseRoot = "https://repo.mumfrey.com/content/repositories/liteloader/";
+
+    public required RawVersionModel InheritVersion { get; init; }
+    public required LiteLoaderDownloadVersionModel VersionModel { get; init; }
+    public override required string RootPath { get; init; }
+
+    public string Install()
+    {
+        return this.InstallTaskAsync().GetAwaiter().GetResult();
+    }
+
+    public async Task<string> InstallTaskAsync()
+    {
+        ArgumentException.ThrowIfNullOrEmpty(this.RootPath);
+        ArgumentNullException.ThrowIfNull(this.InheritVersion);
+        ArgumentNullException.ThrowIfNull(this.VersionModel);
+
+        this.InvokeStatusChangedEvent("Starting LiteLoader installation", ProgressValue.Start);
+
+        var vl = new DefaultVersionLocator(this.RootPath, Guid.Empty);
+        var wrappedRawVersion = vl.ParseRawVersion(this.VersionModel.McVersion);
+
+        this.InvokeStatusChangedEvent("Resolving version", ProgressValue.FromDisplay(10));
+
+        if (wrappedRawVersion.Item1 != null || wrappedRawVersion.Item2 == null)
+            throw new UnknownGameNameException(this.VersionModel.McVersion);
+
+        var rawVersion = wrappedRawVersion.Item2;
+
+        if (rawVersion.Id != this.VersionModel.McVersion)
+            throw new NotSupportedException("LiteLoader does not support this Minecraft version.");
+
+        var id = string.IsNullOrEmpty(this.CustomId)
+            ? $"{this.VersionModel.McVersion}-LiteLoader{this.VersionModel.McVersion}-{this.VersionModel.Version}"
+            : this.CustomId;
+
+        var timeStamp = long.TryParse(this.VersionModel.Build.Timestamp, out var timeResult) ? timeResult : 0;
+        var time = TimeHelper.Unix11ToDateTime(timeStamp);
+
+        this.InvokeStatusChangedEvent("Resolving libraries", ProgressValue.FromDisplay(30));
+
+        var libraries = new List<Library>
+        {
+            new()
+            {
+                Name = $"com.mumfrey:liteloader:{this.VersionModel.Version}",
+                Url = this.VersionModel.Type.Equals("SNAPSHOT", StringComparison.OrdinalIgnoreCase)
+                    ? SnapshotRoot
+                    : ReleaseRoot
+            }
+        };
+
+        foreach (var lib in this.VersionModel.Build.Libraries
+                     .Where(lib => !string.IsNullOrEmpty(lib.Name) && string.IsNullOrEmpty(lib.Url)).Where(lib =>
+                         lib.Name.StartsWith("org.ow2.asm", StringComparison.OrdinalIgnoreCase)))
+            lib.Url = "https://files.minecraftforge.net/maven/";
+
+        libraries.AddRange(this.VersionModel.Build.Libraries);
+
+        this.InvokeStatusChangedEvent("Library resolution completed", ProgressValue.FromDisplay(60));
+
+        const string mainClass = "net.minecraft.launchwrapper.Launch";
+        var resultModel = new RawVersionModel
+        {
+            Id = id,
+            Time = time,
+            ReleaseTime = time,
+            Libraries = [.. libraries],
+            MainClass = mainClass,
+            InheritsFrom = string.IsNullOrEmpty(this.InheritsFrom) ? this.VersionModel.McVersion : this.InheritsFrom,
+            BuildType = this.VersionModel.Type,
+            JarFile = this.InheritVersion.JarFile ?? this.InheritVersion.Id
+        };
+
+        if (this.InheritVersion.Arguments != null)
+            resultModel.Arguments = new Arguments
+            {
+                Game =
+                [
+                    JsonSerializer.SerializeToElement("--tweakClass", SerializerContext.Default.String),
+                    JsonSerializer.SerializeToElement(this.VersionModel.Build.TweakClass,
+                        SerializerContext.Default.String)
+                ]
+            };
+        else
+            resultModel.MinecraftArguments =
+                $"{this.InheritVersion.MinecraftArguments} --tweakClass {this.VersionModel.Build.TweakClass}";
+
+        var gamePath = Path.Combine(this.RootPath, GamePathHelper.GetGamePath(id));
+        var di = new DirectoryInfo(gamePath);
+
+        if (!di.Exists)
+            di.Create();
+        else
+            DirectoryHelper.CleanDirectory(di.FullName);
+
+        var jsonPath = GamePathHelper.GetGameJsonPath(this.RootPath, id);
+        var jsonContent = JsonSerializer.Serialize(resultModel, typeof(RawVersionModel),
+            new SerializerContext(JsonHelper.CamelCasePropertyNamesSettings()));
+
+        await File.WriteAllTextAsync(jsonPath, jsonContent);
+
+        this.InvokeStatusChangedEvent("LiteLoader installation completed", ProgressValue.Finished);
+
+        return id;
+    }
+}

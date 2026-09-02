@@ -1,0 +1,103 @@
+﻿using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Text.Json;
+using System.Threading.Tasks;
+using DILCore.Class.Helper;
+using DILCore.Class.Model;
+using DILCore.Class.Model.Fabric;
+using DILCore.Interface;
+
+namespace DILCore.DefaultComponent.Installer;
+
+public class FabricInstaller : InstallerBase, IFabricInstaller
+{
+    public required IVersionLocator VersionLocator { get; init; }
+    public required FabricLoaderArtifactModel LoaderArtifact { get; init; }
+    public override required string RootPath { get; init; }
+
+    public string Install()
+    {
+        return this.InstallTaskAsync().GetAwaiter().GetResult();
+    }
+
+    public async Task<string> InstallTaskAsync()
+    {
+        this.InvokeStatusChangedEvent("Starting installation", ProgressValue.Start);
+
+        ArgumentException.ThrowIfNullOrEmpty(this.RootPath);
+
+        var mcVersion = this.LoaderArtifact.Intermediary.Version;
+        var fabricVersion = this.LoaderArtifact.Loader.Separator == "."
+            ? this.LoaderArtifact.Loader.Version
+            : this.LoaderArtifact.Loader.Version.Replace(this.LoaderArtifact.Loader.Separator ?? "+build.", ".build.");
+        var id = string.IsNullOrEmpty(this.CustomId)
+            ? $"{mcVersion}-fabric-{fabricVersion}"
+            : this.CustomId;
+
+        var libraries = new List<Library>
+        {
+            new()
+            {
+                Name = this.LoaderArtifact.Loader.Maven,
+                Url = "https://maven.fabricmc.net/"
+            },
+            new()
+            {
+                Name = this.LoaderArtifact.Intermediary.Maven,
+                Url = "https://maven.fabricmc.net/"
+            }
+        };
+
+        libraries.AddRange(this.LoaderArtifact.LauncherMeta.Libraries.Common);
+        libraries.AddRange(this.LoaderArtifact.LauncherMeta.Libraries.Client);
+
+        var mainClassJObject = this.LoaderArtifact.LauncherMeta.MainClass;
+        var mainClass = mainClassJObject.ValueKind switch
+        {
+            JsonValueKind.String => mainClassJObject.Deserialize(SerializerContext.Default.String),
+            JsonValueKind.Object => mainClassJObject.Deserialize(SerializerContext.Default.DictionaryStringString)
+                ?.TryGetValue("client", out var outMainClass) ?? false
+                ? outMainClass
+                : string.Empty,
+            _ => string.Empty
+        };
+
+        ArgumentException.ThrowIfNullOrEmpty(mainClass);
+
+        var inheritsFrom = string.IsNullOrEmpty(this.InheritsFrom) ? mcVersion : this.InheritsFrom;
+
+        var installPath = Path.Combine(this.RootPath, GamePathHelper.GetGamePath(id));
+        var di = new DirectoryInfo(installPath);
+
+        if (!di.Exists)
+            di.Create();
+        else
+            DirectoryHelper.CleanDirectory(di.FullName);
+
+        this.InvokeStatusChangedEvent("Generating version metadata", ProgressValue.FromDisplay(70));
+
+        var resultModel = new RawVersionModel
+        {
+            Id = id,
+            InheritsFrom = inheritsFrom,
+            MainClass = mainClass,
+            Libraries = [.. libraries],
+            Arguments = new Arguments(),
+            ReleaseTime = DateTime.Now,
+            Time = DateTime.Now
+        };
+
+        var jsonPath = GamePathHelper.GetGameJsonPath(this.RootPath, id);
+        var jsonContent = JsonSerializer.Serialize(resultModel, typeof(RawVersionModel),
+            new SerializerContext(JsonHelper.CamelCasePropertyNamesSettings()));
+
+        this.InvokeStatusChangedEvent("Writing the version JSON file", ProgressValue.FromDisplay(95));
+
+        await File.WriteAllTextAsync(jsonPath, jsonContent);
+
+        this.InvokeStatusChangedEvent("Installation completed", ProgressValue.Finished);
+
+        return id;
+    }
+}

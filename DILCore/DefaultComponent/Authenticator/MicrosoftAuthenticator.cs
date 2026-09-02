@@ -1,0 +1,604 @@
+﻿using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Headers;
+using System.Net.Http.Json;
+using System.Text.Json;
+using System.Text.Json.Serialization;
+using System.Text.Json.Serialization.Metadata;
+using System.Threading.Tasks;
+using DILCore.Class.Helper;
+using DILCore.Class.Model;
+using DILCore.Class.Model.Auth;
+using DILCore.Class.Model.LauncherAccount;
+using DILCore.Class.Model.Microsoft.Graph;
+using DILCore.Class.Model.MicrosoftAuth;
+using DILCore.Class.Model.YggdrasilAuth;
+using DILCore.Interface;
+using DILCore.JsonConverter;
+
+namespace DILCore.DefaultComponent.Authenticator;
+
+#region Temp Models
+
+public record CacheTokenProviderResult(
+    bool IsCredentialValid,
+    bool IsAuthResultValid,
+    AuthResultBase? AuthResult,
+    GraphAuthResultModel? CacheAuthResult);
+
+public record McReqModel(
+    [property: JsonPropertyName("identityToken")]
+    string IdentityToken);
+
+#endregion
+
+public class MicrosoftAuthenticator : IAuthenticator
+{
+    public const string MSAuthScope = "XboxLive.signin offline_access";
+    public const string MSAuthXBLUrl = "https://user.auth.xboxlive.com/user/authenticate";
+    public const string MSAuthXSTSUrl = "https://xsts.auth.xboxlive.com/xsts/authorize";
+    public const string MojangAuthUrl = "https://api.minecraftservices.com/authentication/login_with_xbox";
+    public const string MojangOwnershipUrl = "https://api.minecraftservices.com/entitlements/mcstore";
+    public const string MojangProfileUrl = "https://api.minecraftservices.com/minecraft/profile";
+    public const string MSGrantType = "urn:ietf:params:oauth:grant-type:device_code";
+
+    public MicrosoftAuthenticator()
+    {
+        ArgumentNullException.ThrowIfNull(ApiSettings);
+    }
+
+    public static MicrosoftAuthenticatorAPISettings? ApiSettings { get; private set; }
+
+    public static string MSDeviceTokenRequestUrl =>
+        $"https://login.microsoftonline.com/{ApiSettings!.TenentId}/oauth2/v2.0/devicecode";
+
+    public static string MSDeviceTokenStatusUrl =>
+        $"https://login.microsoftonline.com/{ApiSettings!.TenentId}/oauth2/v2.0/token";
+
+    public static string MSRefreshTokenRequestUrl =>
+        $"https://login.microsoftonline.com/{ApiSettings!.TenentId}/oauth2/v2.0/token";
+
+    public string? Email { get; set; }
+
+    /// <summary>
+    ///     MineCraft profile id, used to match the account history
+    /// </summary>
+    public Guid? ProfileId { get; set; }
+
+    public Func<MicrosoftAuthenticator, ValueTask<CacheTokenProviderResult>>? CacheTokenProvider { get; init; }
+    public required IHttpClientFactory HttpClientFactory { get; init; }
+    public required ILauncherAccountParser LauncherAccountParser { get; init; }
+
+    public AuthResultBase Auth(bool userField = false)
+    {
+        return this.AuthTaskAsync(userField).GetAwaiter().GetResult();
+    }
+
+    public async Task<AuthResultBase> AuthTaskAsync(bool userField = false)
+    {
+        if (this.CacheTokenProvider == null)
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Cause = "Required credentials are missing.",
+                    Error = "No valid data was provided.",
+                    ErrorMessage = "Required sign-in parameters are missing."
+                }
+            };
+
+        var cacheTokenResult = await this.CacheTokenProvider(this);
+
+        if (cacheTokenResult is
+            {
+                IsAuthResultValid: true,
+                AuthResult: MicrosoftAuthResult { Error: null, AuthStatus: AuthStatus.Succeeded, ExpiresIn: >= 60 }
+            })
+            return cacheTokenResult.AuthResult;
+
+        if (!cacheTokenResult.IsCredentialValid || cacheTokenResult.CacheAuthResult == null)
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Cause = "Failed to obtain an authentication token.",
+                    Error = "Xbox Live authentication failed.",
+                    ErrorMessage = "Xbox Live authentication failed."
+                }
+            };
+
+        var accessToken = cacheTokenResult.CacheAuthResult.AccessToken;
+        var refreshToken = cacheTokenResult.CacheAuthResult.RefreshToken;
+        var idToken = cacheTokenResult.CacheAuthResult.IdToken;
+
+        #region STAGE 1
+
+        var xBoxLiveToken =
+            await this.SendRequest(MSAuthXBLUrl, AuthXBLRequestModel.Get(accessToken),
+                SerializerContext.Default.AuthXSTSResponseModel,
+                SerializerContext.Default.AuthXBLRequestModel);
+
+        if (xBoxLiveToken == null)
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Cause = "Failed to obtain an authentication token.",
+                    Error = "Xbox Live authentication failed.",
+                    ErrorMessage = "Xbox Live authentication failed."
+                }
+            };
+
+        #endregion
+
+        #region STAGE 2
+
+        var client = this.HttpClientFactory.CreateClient();
+
+        using var xStsReq = new HttpRequestMessage(HttpMethod.Post, MSAuthXSTSUrl);
+        xStsReq.Content = JsonContent.Create(
+            AuthXSTSRequestModel.Get(xBoxLiveToken.Token),
+            SerializerContext.Default.AuthXSTSRequestModel);
+
+        using var xStsMessage = await client.SendAsync(xStsReq);
+
+        if (!xStsMessage.IsSuccessStatusCode)
+        {
+            var errModel =
+                await xStsMessage.Content.ReadFromJsonAsync(SerializerContext.Default.AuthXSTSErrorModel);
+            var reason = (errModel?.XErr ?? 0) switch
+            {
+                2148916233 => "No Xbox account has been created.",
+                2148916238 => "The account belongs to a minor.",
+                _ => "Unknown"
+            };
+
+            var errorMessage = errModel?.Message ?? "Unknown";
+            if (!string.IsNullOrEmpty(errModel?.Redirect))
+                errorMessage += $", related link: {errModel.Redirect}";
+
+            var err = new ErrorModel
+            {
+                Cause = reason,
+                Error = $"XSTS authentication failed. Reason: {reason}",
+                ErrorMessage = errorMessage
+            };
+
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = err
+            };
+        }
+
+        var xStsRes =
+            await xStsMessage.Content.ReadFromJsonAsync(SerializerContext.Default.AuthXSTSResponseModel);
+
+        #endregion
+
+        #region STAGE 2.5 (FETCH XBOX UID)
+
+        using var xUidReq = new HttpRequestMessage(HttpMethod.Post, MSAuthXSTSUrl);
+        xUidReq.Content = JsonContent.Create(
+            AuthXSTSRequestModel.Get(xBoxLiveToken.Token, "http://xboxlive.com"),
+            SerializerContext.Default.AuthXSTSRequestModel);
+
+        using var xUidMessage = await client.SendAsync(xUidReq);
+
+        var xuid = Guid.Empty.ToString("N");
+        if (xUidMessage.IsSuccessStatusCode)
+        {
+            var xUidRes =
+                await xUidMessage.Content.ReadFromJsonAsync(SerializerContext.Default.AuthXSTSResponseModel);
+
+            if (xUidRes != null)
+            {
+                var isXUidXUiExists = xUidRes.DisplayClaims.TryGetProperty("xui", out var xuidXui);
+                JsonElement? firstXuidXui = isXUidXUiExists ? xuidXui[0] : null;
+
+                if (firstXuidXui.HasValue && firstXuidXui.Value.TryGetProperty("xid", out var xid) &&
+                    xid.ValueKind == JsonValueKind.String &&
+                    !string.IsNullOrEmpty(xid.GetString())) xuid = xid.GetString()!;
+            }
+        }
+
+        #endregion
+
+        #region STAGE 3
+
+        var isXUiExists = xStsRes!.DisplayClaims.TryGetProperty("xui", out var xui);
+        JsonElement? firstXui = isXUiExists ? xui[0] : null;
+        if (!firstXui.HasValue || !firstXui.Value.TryGetProperty("uhs", out var uhs) ||
+            uhs.ValueKind != JsonValueKind.String || string.IsNullOrEmpty(uhs.GetString()))
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Cause = "Failed to obtain the UHS value from the authentication result.",
+                    Error = "XSTS authentication failed because the UHS value could not be obtained from the authentication result."
+                }
+            };
+
+        var uhsValue = uhs.GetString()!;
+        var mcReqModel = new McReqModel($"XBL3.0 x={uhsValue};{xStsRes.Token}");
+        var mcRes = await this.SendRequest(MojangAuthUrl, mcReqModel,
+            SerializerContext.Default.AuthMojangResponseModel, SerializerContext.Default.McReqModel);
+
+        #endregion
+
+        if (mcRes == null)
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Error = "The Mojang server returned an invalid response.",
+                    ErrorMessage = "XSTS authentication failed, possibly due to a network problem.",
+                    Cause = "XSTS authentication failed."
+                }
+            };
+
+        #region STAGE 4
+
+        using var ownershipReq = new HttpRequestMessage(HttpMethod.Get, MojangOwnershipUrl);
+        ownershipReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", mcRes.AccessToken);
+
+        using var ownershipRes = await client.SendAsync(ownershipReq);
+
+        var ownership =
+            await ownershipRes.Content.ReadFromJsonAsync(SerializerContext.Default
+                .MojangOwnershipResponseModel);
+
+        if (ownership?.Items == null || ownership.Items.Length == 0)
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Error = "You do not own the game.",
+                    ErrorMessage = "No licensed copy of Minecraft was found for this account. Sign-in was aborted.",
+                    Cause = "The game has not been purchased."
+                }
+            };
+
+        #endregion
+
+        #region STAGE 5
+
+        using var profileReq = new HttpRequestMessage(HttpMethod.Get, MojangProfileUrl);
+        profileReq.Headers.Authorization = new AuthenticationHeaderValue("Bearer", mcRes.AccessToken);
+
+        using var profileRes = await client.SendAsync(profileReq);
+
+        MojangProfileResponseModel? profile;
+
+        try
+        {
+            profile =
+                await profileRes.Content.ReadFromJsonAsync(SerializerContext.Default
+                    .MojangProfileResponseModel);
+        }
+        catch (JsonException e)
+        {
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Cause = "NOPROFILE",
+                    Error = "Failed to retrieve the user profile because no Mojang profile has been created.",
+                    ErrorMessage = e.ToString()
+                }
+            };
+        }
+
+        if (!profileRes.IsSuccessStatusCode || profile == null)
+        {
+            var errModel =
+                await profileRes.Content.ReadFromJsonAsync(SerializerContext.Default.MojangErrorResponseModel);
+
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Cause = "NOPROFILE",
+                    Error = $"Failed to retrieve the user profile. Reason: {errModel?.Error ?? "Unknown"}",
+                    ErrorMessage = errModel?.ErrorMessage ?? "Unknown"
+                }
+            };
+        }
+
+        #endregion
+
+        var uuid = Guid.NewGuid().ToString("N");
+        var accountModel = new AccountModel
+        {
+            AccessToken = mcRes.AccessToken,
+            AccessTokenExpiresAt = DateTime.Now.AddSeconds(mcRes.ExpiresIn),
+            Avatar = profile.GetActiveSkin()?.Url,
+            Cape = profile.GetActiveCape()?.Url,
+            EligibleForMigration = false,
+            HasMultipleProfiles = false,
+            Legacy = false,
+            LocalId = uuid,
+            MinecraftProfile = new AccountProfileModel
+            {
+                Id = profile.Id,
+                Name = profile.Name
+            },
+            Persistent = true,
+            RemoteId = profile.Name,
+            Type = "XBox",
+            UserProperites = null,
+            Username = profile.Name
+        };
+
+        if (!this.LauncherAccountParser.AddOrReplaceAccount(uuid, accountModel, out var id))
+            return new MicrosoftAuthResult
+            {
+                AuthStatus = AuthStatus.Failed,
+                Error = new ErrorModel
+                {
+                    Cause = "An error occurred while adding the record.",
+                    Error = "Failed to add the account.",
+                    ErrorMessage = "Check the permissions for launcher_accounts.json."
+                }
+            };
+
+        var sPUuid = new Guid(profile.Id);
+        var sP = new ProfileInfoModel
+        {
+            Name = profile.Name,
+            Id = sPUuid
+        };
+
+        accountModel.Id = sPUuid;
+
+        if (!string.IsNullOrEmpty(idToken))
+        {
+            try
+            {
+                var claims = JwtTokenHelper.GetTokenInfo(idToken);
+                if (claims.TryGetValue("email", out var email))
+                    this.Email = email;
+            }
+            catch
+            {
+                // id_token parse failed, skip email extraction - not critical for authentication
+            }
+        }
+
+        return new MicrosoftAuthResult
+        {
+            Id = id ?? Guid.Empty,
+            AccessToken = mcRes.AccessToken,
+            AuthStatus = AuthStatus.Succeeded,
+            Skin = profile.GetActiveSkin()?.Url,
+            Cape = profile.GetActiveCape()?.Url,
+            ExpiresIn = mcRes.ExpiresIn,
+            RefreshToken = refreshToken,
+            CurrentAuthTime = DateTime.Now,
+            SelectedProfile = sP,
+            User = new UserInfoModel
+            {
+                Id = sPUuid,
+                UserName = profile.Name
+            },
+            Email = this.Email,
+            XBoxUid = xuid
+        };
+    }
+
+    public AuthResultBase? GetLastAuthResult()
+    {
+        var (_, value) = this.LauncherAccountParser.LauncherAccount.Accounts!
+            .FirstOrDefault(x =>
+                (x.Value.MinecraftProfile?.Id.Equals(this.ProfileId?.ToString("N"),
+                    StringComparison.OrdinalIgnoreCase) ?? false) &&
+                x.Value.Type.Equals("XBox", StringComparison.OrdinalIgnoreCase));
+
+        if (value == null)
+            return null;
+
+        var sP = new ProfileInfoModel
+        {
+            Name = value.MinecraftProfile?.Name ?? this.Email ?? string.Empty,
+            Id = new Guid(value.MinecraftProfile?.Id ?? this.Email ?? string.Empty)
+        };
+
+        return new MicrosoftAuthResult
+        {
+            AccessToken = value.AccessToken,
+            ExpiresIn = (long)(value.AccessTokenExpiresAt - DateTime.Now).TotalSeconds,
+            AuthStatus = AuthStatus.Succeeded,
+            Skin = value.Avatar,
+            Cape = value.Cape,
+            SelectedProfile = sP,
+            User = new UserInfoModel
+            {
+                Id = sP.Id,
+                UserName = sP.Name
+            }
+        };
+    }
+
+    public static void Configure(MicrosoftAuthenticatorAPISettings apiSettings)
+    {
+        ApiSettings = apiSettings;
+    }
+
+    public static object? ResolveMSGraphResult<T>(string content, JsonTypeInfo<T> typeInfo)
+    {
+        var jsonObj = JsonDocument.Parse(content).RootElement;
+        var options = new JsonSerializerOptions
+        {
+            Converters =
+            {
+                new DateTimeConverterUsingDateTimeParse()
+            }
+        };
+
+        if (jsonObj.TryGetProperty("error", out _) && jsonObj.TryGetProperty("error_description", out _))
+            return JsonSerializer.Deserialize(content, typeof(GraphResponseErrorModel),
+                new SerializerContext(options)) as GraphResponseErrorModel;
+
+        return JsonSerializer.Deserialize(content, typeInfo);
+    }
+
+    public static string? LastGetMSAuthResultError { get; private set; }
+
+    public static async Task<GraphAuthResultModel?> GetMSAuthResult(
+        IHttpClientFactory httpClientFactory,
+        Action<DeviceIdResponseModel> deviceTokenNotifier)
+    {
+        LastGetMSAuthResultError = null;
+
+        #region SEND DEVICE TOKEN REQUEST
+
+        var client = httpClientFactory.CreateClient();
+        var deviceTokenRequestDic = new[]
+        {
+            new KeyValuePair<string, string>("client_id", ApiSettings!.ClientId),
+            new KeyValuePair<string, string>("scope", string.Join(' ', ApiSettings.Scopes))
+        };
+
+        using var deviceTokenReq = new HttpRequestMessage(HttpMethod.Post, MSDeviceTokenRequestUrl);
+        deviceTokenReq.Content = new FormUrlEncodedContent(deviceTokenRequestDic);
+
+        HttpResponseMessage deviceTokenRes;
+        try
+        {
+            deviceTokenRes = await client.SendAsync(deviceTokenReq);
+        }
+        catch (Exception ex)
+        {
+            LastGetMSAuthResultError = $"Device token request failed: {ex.Message}";
+            return null;
+        }
+
+        string deviceTokenContent;
+        using (deviceTokenRes)
+        {
+            deviceTokenContent = await deviceTokenRes.Content.ReadAsStringAsync();
+        }
+
+        if (deviceTokenContent.Length == 0)
+        {
+            LastGetMSAuthResultError = "Device token request returned empty response.";
+            return null;
+        }
+
+        var deviceTokenModel =
+            ResolveMSGraphResult(deviceTokenContent, SerializerContext.Default.DeviceIdResponseModel);
+
+        if (deviceTokenModel is not DeviceIdResponseModel deviceTokenResModel)
+        {
+            if (deviceTokenModel is GraphResponseErrorModel err)
+                LastGetMSAuthResultError = $"Device token error: {err.ErrorType} - {err.ErrorDescription}";
+            else
+                LastGetMSAuthResultError = $"Device token response parse failed: {deviceTokenContent}";
+            return null;
+        }
+
+        #endregion
+
+        deviceTokenNotifier.Invoke(deviceTokenResModel);
+
+        #region FETCH USER AUTH RESULT
+
+        var userAuthResultDic = new[]
+        {
+            new KeyValuePair<string, string>("grant_type", MSGrantType),
+            new KeyValuePair<string, string>("client_id", ApiSettings.ClientId),
+            new KeyValuePair<string, string>("device_code", deviceTokenResModel.DeviceCode)
+        };
+
+        GraphAuthResultModel? result;
+        while (true)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(deviceTokenResModel.Interval + 2));
+
+            using var userAuthResultReq = new HttpRequestMessage(HttpMethod.Post, MSDeviceTokenStatusUrl);
+            userAuthResultReq.Content = new FormUrlEncodedContent(userAuthResultDic);
+
+            HttpResponseMessage userAuthResultRes;
+            try
+            {
+                userAuthResultRes = await client.SendAsync(userAuthResultReq);
+            }
+            catch (Exception ex)
+            {
+                LastGetMSAuthResultError = $"User auth polling failed: {ex.Message}";
+                return null;
+            }
+
+            string userAuthResultContent;
+            using (userAuthResultRes)
+            {
+                userAuthResultContent = await userAuthResultRes.Content.ReadAsStringAsync();
+            }
+
+            var userAuthResultModel =
+                ResolveMSGraphResult(userAuthResultContent, SerializerContext.Default.GraphAuthResultModel);
+
+            if (userAuthResultModel is not GraphAuthResultModel)
+            {
+                if (userAuthResultModel is GraphResponseErrorModel error)
+                {
+                    switch (error.ErrorType)
+                    {
+                        case "authorization_pending":
+                            continue;
+                        case "authorization_declined":
+                            LastGetMSAuthResultError = "User declined the authorization.";
+                            return null;
+                        case "expired_token":
+                            LastGetMSAuthResultError = "Device code expired. Please try again.";
+                            return null;
+                        case "bad_verification_code":
+                            LastGetMSAuthResultError = "Bad verification code.";
+                            return null;
+                        default:
+                            LastGetMSAuthResultError = $"Auth error: {error.ErrorType} - {error.ErrorDescription}";
+                            return null;
+                    }
+                }
+
+                LastGetMSAuthResultError = $"Unexpected polling response: {userAuthResultContent}";
+                return null;
+            }
+
+            result = (GraphAuthResultModel?)userAuthResultModel;
+            break;
+        }
+
+        #endregion
+
+        return result;
+    }
+
+    private async Task<T?> SendRequest<T, TReq>(
+        string url,
+        TReq model,
+        JsonTypeInfo<T> typeInfo,
+        JsonTypeInfo<TReq> reqTypeInfo)
+    {
+        var client = this.HttpClientFactory.CreateClient();
+        var content = JsonContent.Create(model, reqTypeInfo);
+
+        using var res = await client.PostAsync(url, content);
+
+        if (!res.IsSuccessStatusCode) return default;
+
+        var result = await res.Content.ReadFromJsonAsync(typeInfo);
+
+        return result;
+    }
+}
