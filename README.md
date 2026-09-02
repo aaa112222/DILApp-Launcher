@@ -25,6 +25,9 @@ dotnet build DIL.sln
 ```bash
 dotnet publish DILApp/DILApp.csproj -c Release -r win-x64
 ```
+## Thanks
+corona studio: projbobcat
+PCL2: some of xaml
 
 ## License
 
