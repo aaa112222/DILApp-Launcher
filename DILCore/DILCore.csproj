@@ -1,0 +1,34 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Library</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <RootNamespace>DILCore</RootNamespace>
+    <AssemblyName>DILCore</AssemblyName>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <GeneratePackageOnBuild>false</GeneratePackageOnBuild>
+    <EnableNETAnalyzers>true</EnableNETAnalyzers>
+    <AnalysisLevel>latest</AnalysisLevel>
+    <IsAotCompatible>true</IsAotCompatible>
+    <Authors>DIL</Authors>
+    <Company>DIL</Company>
+    <Product>DILCore</Product>
+    <Description>Minecraft launcher core for DIL.</Description>
+    <Copyright>Copyright © 2025 DIL</Copyright>
+    <RepositoryType>git</RepositoryType>
+    <PackageTags>minecraft-launcher minecraft launcher csharp</PackageTags>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="DnsClient" Version="1.8.0" />
+    <PackageReference Include="Microsoft.Extensions.Configuration.EnvironmentVariables" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.Http" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Extensions.ObjectPool" Version="10.0.11" />
+    <PackageReference Include="Microsoft.IO.RecyclableMemoryStream" Version="3.0.1" />
+    <PackageReference Include="SharpJsonRepair" Version="0.1.0" />
+    <PackageReference Include="System.Diagnostics.PerformanceCounter" Version="10.0.11" />
+    <PackageReference Include="Microsoft.Windows.CsWin32" Version="0.3.321">
+      <PrivateAssets>all</PrivateAssets>
+    </PackageReference>
+  </ItemGroup>
+</Project>

@@ -1,0 +1,202 @@
+﻿using System.Collections.Generic;
+using System.Net.Http;
+using System.Net.Http.Json;
+using System.Text.Json.Serialization;
+using System.Threading;
+using System.Threading.Tasks;
+using DILCore.Class.Model;
+using DILCore.Class.Model.CurseForge;
+using DILCore.Class.Model.CurseForge.API;
+using DILCore.Exceptions;
+using DILCore.Interface;
+using DILCore.Interface.Services;
+
+namespace DILCore.Services;
+
+#region Temp Models
+
+public record AddonInfoReqModel(
+    [property: JsonPropertyName("modIds")] IReadOnlyList<long> ModIds);
+
+public record FileInfoReqModel(
+    [property: JsonPropertyName("fileIds")]
+    IReadOnlyList<long> FileIds);
+
+public record FuzzyFingerPrintReqModel(
+    [property: JsonPropertyName("fingerprints")]
+    IReadOnlyList<long> Fingerprints);
+
+#endregion
+
+public class CurseForgeApiService(
+    HttpClient httpClient,
+    ILauncherCoreSettingsProvider settingsProvider) : ICurseForgeApiService
+{
+    private const string DefaultApiUrl = "https://api.curseforge.com/v1";
+
+    public async Task<DataModelWithPagination<CurseForgeAddonInfo[]>?> SearchAddons(CurseForgeSearchOptions options,
+        CancellationToken ct)
+    {
+        var reqUrl = $"{this.GetApiRoot()}/mods/search{options}";
+
+        using var res = await httpClient.GetAsync(reqUrl, ct);
+
+        if (!res.IsSuccessStatusCode)
+            return null;
+
+        return await res.Content.ReadFromJsonAsync(
+            SerializerContext.Default.DataModelWithPaginationCurseForgeAddonInfoArray, ct);
+    }
+
+    public async Task<CurseForgeAddonInfo?> GetAddon(long addonId)
+    {
+        var reqUrl = $"{this.GetApiRoot()}/mods/{addonId}";
+
+        using var res = await httpClient.GetAsync(reqUrl);
+
+        return (await res.Content.ReadFromJsonAsync(SerializerContext.Default.DataModelCurseForgeAddonInfo))
+            ?.Data;
+    }
+
+    public async Task<CurseForgeAddonInfo[]?> GetAddons(
+        IReadOnlyList<long> addonIds,
+        bool useOfficialApi = false)
+    {
+        var apiRoot = useOfficialApi
+            ? DefaultApiUrl
+            : this.GetApiRoot();
+
+        var reqUrl = $"{apiRoot}/mods";
+        var content = JsonContent.Create(new AddonInfoReqModel(addonIds), SerializerContext.Default.AddonInfoReqModel);
+
+        using var res = await httpClient.PostAsync(reqUrl, content);
+
+        if (!res.IsSuccessStatusCode)
+        {
+            var error = await res.Content.ReadAsStringAsync();
+            var message = $"""
+                           Failed to get CurseForge addon info.
+                           {error}
+                           """;
+
+            throw new CurseForgeAddonResolveException(message);
+        }
+
+        return (await res.Content.ReadFromJsonAsync(SerializerContext.Default.DataModelCurseForgeAddonInfoArray))?.Data;
+    }
+
+    public async Task<DataModelWithPagination<CurseForgeLatestFileModel[]>?> GetAddonFiles(
+        long addonId,
+        int index = 0,
+        int pageSize = 50)
+    {
+        var reqUrl = $"{this.GetApiRoot()}/mods/{addonId}/files?index={index}&pageSize={pageSize}";
+
+        using var res = await httpClient.GetAsync(reqUrl);
+
+        res.EnsureSuccessStatusCode();
+
+        return await res.Content.ReadFromJsonAsync(SerializerContext.Default
+            .DataModelWithPaginationCurseForgeLatestFileModelArray);
+    }
+
+    public async Task<CurseForgeLatestFileModel[]?> GetFiles(
+        IReadOnlyList<long> fileIds,
+        bool useOfficialApi = false)
+    {
+        var apiRoot = useOfficialApi
+            ? DefaultApiUrl
+            : this.GetApiRoot();
+
+        var reqUrl = $"{apiRoot}/mods/files";
+        var content = JsonContent.Create(new FileInfoReqModel(fileIds), SerializerContext.Default.FileInfoReqModel);
+
+        using var res = await httpClient.PostAsync(reqUrl, content);
+
+        if (!res.IsSuccessStatusCode)
+        {
+            var error = await res.Content.ReadAsStringAsync();
+            var message = $"""
+                           Failed to get CurseForge file info.
+                           {error}
+                           """;
+
+            throw new CurseForgeFileResolveException(message);
+        }
+
+        return (await res.Content.ReadFromJsonAsync(SerializerContext.Default.DataModelCurseForgeLatestFileModelArray))
+            ?.Data;
+    }
+
+    public async Task<CurseForgeSearchCategoryModel[]?> GetCategories(int gameId = 432)
+    {
+        var reqUrl = $"{this.GetApiRoot()}/categories?gameId={gameId}";
+
+        using var res = await httpClient.GetAsync(reqUrl);
+
+        return (await res.Content.ReadFromJsonAsync(SerializerContext.Default
+            .DataModelCurseForgeSearchCategoryModelArray))?.Data;
+    }
+
+    public async Task<CurseForgeFeaturedAddonModel?> GetFeaturedAddons(FeaturedQueryOptions options)
+    {
+        const string reqUrl = "https://api.curseforge.com/v1/mods/featured";
+
+        var content = JsonContent.Create(options, SerializerContext.Default.FeaturedQueryOptions);
+
+        using var res = await httpClient.PostAsync(reqUrl, content);
+        res.EnsureSuccessStatusCode();
+
+        return (await res.Content.ReadFromJsonAsync(SerializerContext.Default
+            .DataModelCurseForgeFeaturedAddonModel))?.Data;
+    }
+
+    public async Task<string?> GetAddonDownloadUrl(long addonId, long fileId)
+    {
+        var reqUrl = $"{this.GetApiRoot()}/mods/{addonId}/files/{fileId}/download-url";
+
+        using var res = await httpClient.GetAsync(reqUrl);
+
+        if (!res.IsSuccessStatusCode)
+            throw new CurseForgeModResolveException(addonId, fileId);
+
+        return (await res.Content.ReadFromJsonAsync(SerializerContext.Default.DataModelString))?.Data;
+    }
+
+    public async Task<string?> GetAddonDescriptionHtml(long addonId)
+    {
+        var reqUrl = $"{this.GetApiRoot()}/mods/{addonId}/description";
+
+        using var res = await httpClient.GetAsync(reqUrl);
+        res.EnsureSuccessStatusCode();
+
+        return (await res.Content.ReadFromJsonAsync(SerializerContext.Default.DataModelString))?.Data;
+    }
+
+    public async Task<CurseForgeFuzzySearchResponseModel?> TryFuzzySearchFile(
+        long[] fingerprint,
+        int gameId = 432)
+    {
+        var reqUrl = $"{this.GetApiRoot()}/fingerprints/{gameId}";
+
+        var content = JsonContent.Create(
+            new FuzzyFingerPrintReqModel(fingerprint),
+            SerializerContext.Default.FuzzyFingerPrintReqModel);
+
+        using var res = await httpClient.PostAsync(reqUrl, content);
+        res.EnsureSuccessStatusCode();
+
+        return (await res.Content.ReadFromJsonAsync(SerializerContext.Default
+            .DataModelCurseForgeFuzzySearchResponseModel))?.Data;
+    }
+
+    private string GetApiRoot()
+    {
+        var customRoot = settingsProvider.CurseForgeApiBaseUrl();
+
+        if (!string.IsNullOrEmpty(customRoot))
+            return customRoot;
+
+        return DefaultApiUrl;
+    }
+}

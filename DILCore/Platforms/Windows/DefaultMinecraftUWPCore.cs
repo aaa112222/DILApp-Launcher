@@ -1,0 +1,80 @@
+﻿using System;
+using System.Diagnostics;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Runtime.Versioning;
+using System.Threading.Tasks;
+using DILCore.Class;
+using DILCore.Class.Model;
+using DILCore.Class.Model.YggdrasilAuth;
+using DILCore.DefaultComponent.Launch.GameCore;
+using DILCore.Event;
+
+namespace DILCore.Platforms.Windows;
+
+/// <summary>
+///     提供了UWP版本MineCraft的启动核心
+/// </summary>
+[SupportedOSPlatform(nameof(OSPlatform.Windows))]
+public class DefaultMineCraftUWPCore : GameCoreBase
+{
+    public override LaunchResult Launch(LaunchSettings launchSettings)
+    {
+        var timestamp = Stopwatch.GetTimestamp();
+
+        if (!SystemInfoHelper.IsMinecraftUWPInstalled())
+            return new LaunchResult
+            {
+                ErrorType = LaunchErrorType.OperationFailed,
+                Error = new ErrorModel
+                {
+                    Error = "Game not found",
+                    ErrorMessage = "No UWP version of Minecraft was found."
+                }
+            };
+
+        var psi = new ProcessStartInfo("minecraft:")
+        {
+            UseShellExecute = true
+        };
+
+        Process.Start(psi);
+
+        var uwpProcess = Process.GetProcessesByName("Minecraft.Windows").FirstOrDefault();
+
+        /*using var process = new Process
+            { StartInfo = psi };*/
+
+        var launchWrapper = new LaunchWrapper(null!, launchSettings)
+        {
+            GameCore = this,
+            Process = uwpProcess!
+        };
+        launchWrapper.Do();
+
+        this.InvokeLaunchLogThenStart(string.Empty, "Launching game", ref timestamp);
+
+        Task.Run(launchWrapper.Process.WaitForExit)
+            .ContinueWith(task =>
+            {
+                this.OnGameExit(launchWrapper, new GameExitEventArgs
+                {
+                    SourceGameId = string.Empty,
+                    Exception = task.Exception,
+                    ExitCode = launchWrapper.ExitCode
+                });
+            });
+
+        return new LaunchResult
+        {
+            RunTime = Stopwatch.GetElapsedTime(timestamp),
+            GameProcess = uwpProcess,
+            LaunchSettings = launchSettings
+        };
+    }
+
+    public override Task<LaunchResult> LaunchTaskAsync(LaunchSettings? settings)
+    {
+        throw new InvalidOperationException();
+    }
+}
