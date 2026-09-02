@@ -1,0 +1,16 @@
+﻿using System.Text.Json;
+using System.Text.Json.Serialization;
+
+namespace DILCore.Class.Model.GameResource;
+
+public class Pack
+{
+    [JsonPropertyName("pack_format")] public int PackFormat { get; set; }
+
+    [JsonPropertyName("description")] public JsonElement? Description { get; set; }
+}
+
+public class GameResourcePackModel
+{
+    [JsonPropertyName("pack")] public Pack? Pack { get; set; }
+}

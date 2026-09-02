@@ -1,0 +1,12 @@
+﻿using System.Net.Http;
+using DILCore.Interface;
+
+namespace DILCore.Class.Model;
+
+public abstract class InstallerBase : ProgressReportBase, IInstaller
+{
+    public abstract string RootPath { get; init; }
+    public string? CustomId { get; init; }
+    public string? InheritsFrom { get; init; }
+    public required IHttpClientFactory HttpClientFactory { get; init; }
+}

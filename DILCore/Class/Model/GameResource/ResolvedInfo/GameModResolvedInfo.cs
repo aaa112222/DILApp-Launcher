@@ -1,0 +1,16 @@
+﻿using System.Collections.Immutable;
+
+namespace DILCore.Class.Model.GameResource.ResolvedInfo;
+
+public record GameModResolvedInfo(
+    string? Author,
+    string FilePath,
+    IImmutableList<string>? ModList,
+    string? Title,
+    string? Version,
+    string? ModType,
+    bool IsEnabled)
+{
+    public ModLoaderType LoaderType { get; init; }
+    public byte[]? IconBytes { get; init; }
+}

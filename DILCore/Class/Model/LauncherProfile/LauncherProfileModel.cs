@@ -1,0 +1,15 @@
+﻿using System.Collections.Generic;
+using System.Text.Json.Serialization;
+
+namespace DILCore.Class.Model.LauncherProfile;
+
+public class LauncherProfileModel
+{
+    [JsonPropertyName("profiles")] public Dictionary<string, GameProfileModel>? Profiles { get; init; }
+
+    [JsonPropertyName("clientToken")] public string? ClientToken { get; init; }
+
+    [JsonPropertyName("selectedUser")] public SelectedUserModel? SelectedUser { get; set; }
+
+    [JsonPropertyName("launcherVersion")] public LauncherVersionModel? LauncherVersion { get; init; }
+}

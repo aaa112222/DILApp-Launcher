@@ -1,0 +1,90 @@
+﻿using System.Collections.Generic;
+using System.Text;
+using DILCore.Class.Model.LauncherProfile;
+using DILCore.Class.Model.YggdrasilAuth;
+using DILCore.Interface;
+
+namespace DILCore.Class.Model;
+
+public class GameArguments
+{
+    public required JavaRuntimeInfo? Java { get; set; }
+    public uint MinMemory { get; set; }
+    public required uint MaxMemory { get; set; }
+    public ResolutionModel? Resolution { get; set; }
+    public required GcType GcType { get; init; }
+    public IReadOnlyList<string>? AdditionalJvmArguments { get; set; }
+    public ServerSettings? ServerSettings { get; set; }
+
+    /// <summary>
+    ///     Join world name (Starting from 1.20, single player only)
+    /// </summary>
+    public string? JoinWorldName { get; set; }
+
+    public string? AdvanceArguments { get; set; }
+}
+
+public class LaunchSettings
+{
+    public required string GameName { get; init; }
+
+    /// <summary>
+    ///     Real game root, should be the root of /saves, /logs
+    /// </summary>
+    public required string GamePath { get; init; }
+
+    /// <summary>
+    ///     The game resource path, should be the root of  /libraries
+    /// </summary>
+    public required string GameResourcePath { get; init; }
+
+    /// <summary>
+    ///     Real version id, like 1.14, 1.14-forge-xxxx
+    /// </summary>
+    public required string Version { get; init; }
+
+    public required bool UseShellExecute { get; init; }
+
+    public bool EnableXmlLoggingOutput { get; init; }
+
+    public required NativeReplacementPolicy NativeReplacementPolicy { get; init; }
+
+    /// <summary>
+    ///     游戏窗口标题
+    /// </summary>
+    public string? WindowTitle { get; init; }
+
+    public required IVersionLocator VersionLocator { get; init; }
+
+    public required IAuthenticator Authenticator { get; init; }
+
+    public ProfileInfoModel? SelectedProfile { get; init; }
+
+    public bool VersionInsulation { get; init; }
+    public string? LauncherName { get; init; }
+
+    public GameArguments? FallBackGameArguments { get; init; }
+    public required GameArguments GameArguments { get; init; }
+    public required string[] GameEnvironmentVariables { get; init; }
+    public required bool UseV4NetworkingStack { get; init; }
+    public required bool PreferUtf8Encoding { get; init; }
+    public required bool AutoApplyFixForOldMultiPlayerGame { get; init; }
+    public required string? OldGameTrustStorePath { get; init; }
+
+    public override string ToString()
+    {
+        var sb = new StringBuilder();
+
+        sb
+            .AppendLine()
+            .Append($"Game Name: {this.GameName}").AppendLine()
+            .Append($"Game Resource Path: {this.GameResourcePath}").AppendLine()
+            .Append($"Version: {this.Version}").AppendLine()
+            .Append($"Authenticator: {this.Authenticator?.GetType().Name ?? "-"}").AppendLine()
+            .Append($"Version Insulation: {this.VersionInsulation}").AppendLine()
+            .Append($"ENV: [{string.Join(',', this.GameEnvironmentVariables)}]").AppendLine()
+            .AppendLine();
+
+        return sb.ToString();
+    }
+}
