@@ -8,7 +8,7 @@
     <UseWPF>true</UseWPF>
     <RootNamespace>DILApp</RootNamespace>
     <AssemblyName>DILApp</AssemblyName>
-    <Version>1.1.0</Version>
+    <Version>1.2.0</Version>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <NoWarn>$(NoWarn);8600;8602;8604;8620;8625;4014;8597;2200;CA2200</NoWarn>
   </PropertyGroup>
@@ -19,8 +19,8 @@
     <PublishSingleFile>true</PublishSingleFile>
     <IncludeNativeLibrariesForSelfExtract>true</IncludeNativeLibrariesForSelfExtract>
     <IncludeAllContentForSelfExtract>true</IncludeAllContentForSelfExtract>
-    <EnableCompressionInSingleFile>false</EnableCompressionInSingleFile>
-    <PublishReadyToRun>true</PublishReadyToRun>
+    <EnableCompressionInSingleFile>true</EnableCompressionInSingleFile>
+    <PublishReadyToRun>false</PublishReadyToRun>
     <DebugType>embedded</DebugType>
   </PropertyGroup>
 
